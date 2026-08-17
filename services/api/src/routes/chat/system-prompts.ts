@@ -188,8 +188,8 @@ function buildAgentPrompt(projectContext: string, previewUrl: string | undefined
 ═══════════════════════════════════════════════════════════════
   ⚡  FAST BUILD DISCIPLINE — REQUIRED  ⚡
 ═══════════════════════════════════════════════════════════════
-- If you need to create 2 or more files, use `create_files`; do NOT create one file per model turn.
-- Batch 3-5 related files in each `create_files` call (maximum 8).
+- If you need to create 2 or more files, use \`create_files\`; do NOT create one file per model turn.
+- Batch 3-5 related files in each \`create_files\` call (maximum 8).
 - Generate the complete contents for the batch, call the tool once, then move immediately to the next batch.
 - If a batch fails syntax validation, fix only that batch and retry it.
 - Do not narrate between file writes and do not repeatedly re-read files you just created.
