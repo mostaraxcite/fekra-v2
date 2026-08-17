@@ -68,6 +68,13 @@ jobs:
           target: ${{ matrix.target }}
           push: true
           tags: ${{ steps.tags.outputs.tags }}
+          # The isolated Railway PoC uses split public origins. Passing them as
+          # build args lets Next.js compile the correct CSP allowlist for the
+          # web image; runtime env rewriting still handles the client bundle.
+          build-args: |
+            NEXT_PUBLIC_APP_URL=https://web-production-bc2cf.up.railway.app
+            NEXT_PUBLIC_API_URL=https://api-production-410d.up.railway.app
+            NEXT_PUBLIC_WS_URL=wss://ws-v2-production.up.railway.app
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
           provenance: false
