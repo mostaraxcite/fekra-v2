@@ -37,6 +37,29 @@ function cookieParentDomain(): string | null {
   try { apiHost = new URL(API_URL, window.location.origin).hostname; } catch { return null; }
   const webHost = window.location.hostname;
   if (!apiHost || apiHost === webHost) return null; // same host → host-only cookie
+
+  // Managed hosting domains (Railway, Vercel, etc.) are shared by unrelated
+  // customers. Never infer a parent cookie domain from them. On Railway, for
+  // example, web-production-*.up.railway.app + api-production-*.up.railway.app
+  // would otherwise produce Domain=.up.railway.app. Browsers reject that
+  // public hosting suffix, so login succeeds at the API but the SSR middleware
+  // never sees the session cookie and immediately redirects /dashboard back to
+  // /login. Keep a host-only cookie in these environments. When Fekra moves to
+  // app.fekra.dev + api.fekra.dev we can explicitly use our own parent domain.
+  const managedHostingSuffixes = [
+    ".up.railway.app",
+    ".vercel.app",
+    ".netlify.app",
+    ".pages.dev",
+  ];
+  if (
+    managedHostingSuffixes.some(
+      (suffix) => webHost.endsWith(suffix) || apiHost.endsWith(suffix),
+    )
+  ) {
+    return null;
+  }
+
   // Never scope to an apex of <=1 label or to a raw IP / localhost.
   const isIpOrLocal = (h: string) => /^[0-9.]+$/.test(h) || h === "localhost" || !h.includes(".");
   if (isIpOrLocal(apiHost) || isIpOrLocal(webHost)) return null;
