@@ -1,45 +1,18 @@
 /**
- * First-user bootstrap logic.
+ * Fekra first-account bootstrap.
  *
- * After a new user is created, this function determines whether that user
- * should be automatically promoted to platform owner (admin). The check runs
- * three layers of safety in order:
+ * Exactly one account is automatically elevated by signup: the first user row
+ * ever created in the database. Every later signup remains a normal user.
  *
- *   1. If bootstrap_completed_at is already set → hard NO, forever.
- *   2. If the new user is the only non-deleted user in the table → promote.
- *   3. If INSTALL_BOOTSTRAP_TOKEN is set in env AND matches the presented token
- *      AND the token has not passed its TTL → promote.
- *
- * On promotion the function:
- *   - Sets is_platform_admin=true, platform_role='owner', is_verified_publisher=true
- *   - Creates a default workspace (via ensureWorkspace) — skipped if caller already did it
- *   - Bumps credit_balances to enterprise tier
- *   - Writes a row to admin_audit_log
- *   - Sets platform_config.bootstrap_completed_at = NOW()
- *
- * SECURITY INVARIANTS:
- *   - Server-side only. Client cannot trigger promotion.
- *   - Once bootstrap_completed_at is set, path is permanently closed.
- *   - Bootstrap token is NEVER logged.
- *   - IP + user agent must be passed in for the audit log row.
+ * The decision is made under a PostgreSQL advisory transaction lock so two
+ * concurrent signups cannot both become owners. Once bootstrap_completed_at is
+ * written, automatic elevation is permanently sealed. There is intentionally
+ * no request token, query parameter, or environment token that can elevate a
+ * later signup.
  */
 
-import { timingSafeEqual } from "node:crypto";
-
 import { sql } from "../db/index.js";
-import { getConfig, setConfig } from "../lib/platformConfig.js";
-
-function constantTimeStringEqual(a: string, b: string): boolean {
-  // timingSafeEqual requires equal-length buffers. Different lengths are not
-  // equal — but we still want the comparison itself to be constant-time, so we
-  // pad to a fixed length and then compare. Length mismatch is returned as
-  // false unconditionally.
-  if (a.length !== b.length) return false;
-  const ab = Buffer.from(a, "utf8");
-  const bb = Buffer.from(b, "utf8");
-  if (ab.length !== bb.length) return false;
-  return timingSafeEqual(ab, bb);
-}
+import { invalidatePlatformConfigCache } from "../lib/platformConfig.js";
 
 export interface BootstrapResult {
   promoted: boolean;
@@ -47,159 +20,153 @@ export interface BootstrapResult {
 }
 
 export interface BootstrapContext {
-  /** IP address of the request, for audit log */
   clientIp?: string | null;
-  /** User-Agent header, for audit log */
   userAgent?: string | null;
 }
 
+const FIRST_OWNER_LOCK_ID = 734921001;
+
+function configIsSealed(value: unknown): boolean {
+  return typeof value === "string"
+    ? value.length > 0 && value !== "null"
+    : value !== null && value !== undefined && value !== false;
+}
+
 /**
- * Check whether the newly-created user should be promoted to platform owner.
- * Call AFTER the user row exists in DB, BEFORE returning the auth response.
+ * Promote the first-ever account to platform owner.
  *
- * @param newUserId  UUID of the freshly-created user
- * @param presentedToken  Optional token from ?bootstrap= query or request body
- * @param ctx  Request context for audit logging
+ * If a previous first-signup request crashed after inserting the user but
+ * before completing bootstrap, a later invocation repairs that situation by
+ * promoting the actual earliest user rather than the later caller. The return
+ * value reports whether `newUserId` itself was promoted.
  */
 export async function firstUserBootstrap(
   newUserId: string,
-  presentedToken?: string | null,
   ctx?: BootstrapContext,
 ): Promise<BootstrapResult> {
-  // ── Layer 1: Bootstrap permanently closed once completed ─────────────────
-  // Treat ANY non-empty string in bootstrap_completed_at as "sealed". Only
-  // literal SQL NULL or the JSON literal `null` means unsealed. This makes
-  // the seal robust to operators poking the JSONB column manually.
-  const completedAt = await getConfig("bootstrap_completed_at");
-  const isSealed =
-    typeof completedAt === "string"
-      ? completedAt.length > 0 && completedAt !== "null"
-      : completedAt !== null && completedAt !== undefined && completedAt !== false;
-  if (isSealed) {
-    return { promoted: false, reason: "bootstrap_already_completed" };
-  }
+  let promotedUserId: string | null = null;
+  let callerWasPromoted = false;
+  let resultReason = "not_first_user";
 
-  // ── Layer 2: Is this the first user? ─────────────────────────────────────
-  // The seal in Layer 1 (bootstrap_completed_at) is what makes this safe — once
-  // the first signup promotes, the path is permanently closed even if rows are
-  // later deleted/recreated. The users table has no deleted_at column today,
-  // so we count all rows. If soft-delete is added later, switch to
-  // `WHERE deleted_at IS NULL` — but the seal already protects the invariant.
-  const [countRow] = await sql<{ cnt: string }[]>`
-    SELECT COUNT(*) AS cnt FROM users
-  `;
-  const userCount = parseInt(countRow?.cnt ?? "0", 10);
+  await sql.begin(async (tx: any) => {
+    // Serialize all signup bootstrap decisions across API replicas.
+    await tx`SELECT pg_advisory_xact_lock(${FIRST_OWNER_LOCK_ID})`;
 
-  let shouldPromote = userCount <= 1;
-  let promoteReason = "first_user";
-
-  // ── Layer 3: Valid bootstrap token presented ──────────────────────────────
-  // Constant-time compare to prevent timing side-channel; TTL read from env
-  // (INSTALL_BOOTSTRAP_TOKEN_EXPIRES_AT) because that's where setup-server.sh
-  // and docker/setup.sh write it. Falls back to platform_config row if env
-  // unset (lets operators rotate via /admin/regenerate without restart).
-  if (!shouldPromote && presentedToken) {
-    const envToken = process.env.INSTALL_BOOTSTRAP_TOKEN;
-    if (envToken && constantTimeStringEqual(envToken, presentedToken)) {
-      let tokenValid = true;
-      const envExpiry = process.env.INSTALL_BOOTSTRAP_TOKEN_EXPIRES_AT;
-      const dbExpiry = await getConfig("bootstrap_token_expires_at");
-      const expiresRaw =
-        envExpiry ||
-        (dbExpiry && dbExpiry !== "null" ? (dbExpiry as string) : null);
-      if (expiresRaw) {
-        const expiresAt = new Date(expiresRaw);
-        if (!isNaN(expiresAt.getTime()) && Date.now() > expiresAt.getTime()) {
-          tokenValid = false;
-        }
-      } else {
-        // No TTL configured anywhere — refuse the token. Operator must set
-        // INSTALL_BOOTSTRAP_TOKEN_EXPIRES_AT (setup scripts already do this).
-        // This is fail-closed: a missing TTL never means "valid forever".
-        tokenValid = false;
-      }
-      if (tokenValid) {
-        shouldPromote = true;
-        promoteReason = "bootstrap_token";
-      }
-    }
-  }
-
-  if (!shouldPromote) {
-    return { promoted: false, reason: "not_eligible" };
-  }
-
-  // ── Promote ───────────────────────────────────────────────────────────────
-  await sql`
-    UPDATE users
-    SET is_platform_admin     = true,
-        platform_role         = 'owner',
-        is_verified_publisher = true,
-        updated_at            = now()
-    WHERE id = ${newUserId}::uuid
-  `;
-
-  // Bump credit balance to enterprise tier for all the user's workspaces (upsert)
-  await sql`
-    UPDATE credit_balances
-    SET daily_credits    = 999999,
-        monthly_credits  = 999999,
-        plan_type        = 'enterprise',
-        updated_at       = now()
-    WHERE user_id = ${newUserId}::uuid
-  `;
-
-  // BUG-R27-004: the project-cap check at routes/projects/list-routes.ts:292
-  // reads workspaces.plan (default 'free' = 3-project cap) — NOT
-  // credit_balances.plan_type. Without this bump, the freshly-promoted owner
-  // hits a Free Plan banner and 403s out at the 4th project, even though
-  // their credit balance is enterprise-tier. Promote every workspace the
-  // user owns so the limits, dashboard chip, and plan-defaults all agree.
-  await sql`
-    UPDATE workspaces w
-    SET plan       = 'enterprise',
-        updated_at = now()
-    FROM workspace_members wm
-    WHERE wm.workspace_id = w.id
-      AND wm.user_id      = ${newUserId}::uuid
-      AND wm.role         = 'owner'
-  `;
-
-  // Audit BEFORE sealing so a crash between the two doesn't leave a sealed
-  // promotion with no audit row. The audit helper swallows its own errors
-  // (audit failure must not break signup), but the await guarantees ordering.
-  await writeBootstrapAuditLog(newUserId, promoteReason, ctx);
-
-  // Seal the bootstrap path permanently
-  await setConfig("bootstrap_completed_at", new Date().toISOString());
-
-  return { promoted: true, reason: promoteReason };
-}
-
-async function writeBootstrapAuditLog(
-  userId: string,
-  reason: string,
-  ctx?: BootstrapContext,
-): Promise<void> {
-  try {
-    await sql`
-      INSERT INTO admin_audit_log
-        (actor_id, actor_email, actor_role, action,
-         resource_type, resource_id, details, client_ip, user_agent)
-      SELECT
-        u.id,
-        u.email,
-        'platform_admin',
-        'bootstrap_promote_owner',
-        'user',
-        u.id::text,
-        ${sql.json({ reason } as never)},
-        ${ctx?.clientIp ?? null}::inet,
-        ${ctx?.userAgent ?? null}
-      FROM users u WHERE u.id = ${userId}::uuid
+    const [configRow] = await tx<{ value: unknown }[]>`
+      SELECT value
+      FROM platform_config
+      WHERE key = 'bootstrap_completed_at'
+      FOR UPDATE
     `;
-  } catch (err) {
-    // Surface but don't rethrow — audit failure must not break signup.
-    console.warn("[firstUserBootstrap] audit INSERT failed:", err);
+
+    if (configIsSealed(configRow?.value)) {
+      resultReason = "bootstrap_already_completed";
+      return;
+    }
+
+    // The first account is deterministic even if two registrations arrive at
+    // almost the same time. UUID is only a tie-breaker for identical timestamps.
+    const [firstUser] = await tx<{ id: string }[]>`
+      SELECT id
+      FROM users
+      ORDER BY created_at ASC, id ASC
+      LIMIT 1
+    `;
+
+    if (!firstUser?.id) {
+      resultReason = "no_users";
+      return;
+    }
+
+    promotedUserId = firstUser.id;
+    callerWasPromoted = firstUser.id === newUserId;
+    resultReason = callerWasPromoted ? "first_user" : "recovered_first_user";
+
+    await tx`
+      UPDATE users
+      SET is_platform_admin     = true,
+          platform_role         = 'owner',
+          is_verified_publisher = true,
+          updated_at            = now()
+      WHERE id = ${firstUser.id}::uuid
+    `;
+
+    // These updates are no-ops if the first user's workspace/credit row has
+    // not been created yet; normal signup invokes bootstrap after workspace
+    // creation, so the standard path receives owner entitlements immediately.
+    await tx`
+      UPDATE credit_balances
+      SET daily_credits    = 999999,
+          monthly_credits  = 999999,
+          plan_type        = 'enterprise',
+          updated_at       = now()
+      WHERE user_id = ${firstUser.id}::uuid
+    `;
+
+    await tx`
+      UPDATE workspaces w
+      SET plan       = 'enterprise',
+          updated_at = now()
+      FROM workspace_members wm
+      WHERE wm.workspace_id = w.id
+        AND wm.user_id      = ${firstUser.id}::uuid
+        AND wm.role         = 'owner'
+    `;
+
+    // Seal automatic promotion in the SAME transaction as the role update.
+    // This prevents a crash from leaving an owner promotion without a seal.
+    const sealedAtJson = JSON.stringify(new Date().toISOString());
+    await tx`
+      INSERT INTO platform_config (key, value, updated_by, updated_at)
+      VALUES (
+        'bootstrap_completed_at',
+        ${sealedAtJson}::jsonb,
+        ${firstUser.id}::uuid,
+        now()
+      )
+      ON CONFLICT (key) DO UPDATE
+        SET value = EXCLUDED.value,
+            updated_by = EXCLUDED.updated_by,
+            updated_at = now()
+    `;
+
+    // Keep the audit row atomic with the promotion when the table is available.
+    try {
+      await tx`
+        INSERT INTO admin_audit_log
+          (actor_id, actor_email, actor_role, action,
+           resource_type, resource_id, details, client_ip, user_agent)
+        SELECT
+          u.id,
+          u.email,
+          'platform_admin',
+          'bootstrap_promote_owner',
+          'user',
+          u.id::text,
+          ${JSON.stringify({ reason: resultReason })}::jsonb,
+          ${ctx?.clientIp ?? null}::inet,
+          ${ctx?.userAgent ?? null}
+        FROM users u
+        WHERE u.id = ${firstUser.id}::uuid
+      `;
+    } catch (err) {
+      // Audit logging must not make the first account unusable on an older DB.
+      console.warn("[firstUserBootstrap] audit INSERT failed:", err);
+    }
+  });
+
+  invalidatePlatformConfigCache("bootstrap_completed_at");
+
+  if (!promotedUserId) {
+    return { promoted: false, reason: resultReason };
   }
+
+  console.info(
+    `[firstUserBootstrap] owner sealed: user=${promotedUserId} caller=${newUserId} reason=${resultReason}`,
+  );
+
+  return {
+    promoted: callerWasPromoted,
+    reason: resultReason,
+  };
 }
