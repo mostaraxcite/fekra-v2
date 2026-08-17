@@ -1,11 +1,9 @@
 -- 073_workspace_sandbox_rules.sql
 -- Workspace-configurable allow/deny rules for AI tool actions.
 --
--- Deploy note: run via `pnpm db:migrate` (which connects as the `doable`
--- application user). If you have to apply this manually as the postgres
--- superuser, the ALTER ... OWNER TO doable lines at the bottom of this
--- file move ownership of the new objects so the API can read/write them
--- without a 42501 (insufficient_privilege) error.
+-- Deploy note: run via `pnpm db:migrate`. Some self-hosted installs use a
+-- dedicated `doable` application database role; Railway may run as `postgres`.
+-- Ownership transfer is therefore conditional so the schema is portable.
 --
 -- Two layers:
 --   workspace_sandbox_settings — per-workspace default action when no rule
@@ -23,9 +21,6 @@
 --   'network' — matches against an outbound hostname. Enforcement is NOT
 --               wired in this scaffold — that needs the dovault egress
 --               jail (servertodo). Schema is ready for when it lands.
---
--- See `project_sandbox_allowlist_feature.md` in operator memory for the
--- planned doable-CLI integration.
 
 DO $$ BEGIN
   CREATE TYPE sandbox_rule_action AS ENUM ('allow', 'deny');
@@ -64,7 +59,6 @@ CREATE TABLE IF NOT EXISTS workspace_sandbox_rules (
   created_by    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   created_at    timestamptz NOT NULL DEFAULT now(),
   updated_at    timestamptz NOT NULL DEFAULT now(),
-  -- Same workspace cannot have duplicate (rule_type, pattern, action) entries.
   UNIQUE (workspace_id, rule_type, pattern, action)
 );
 
@@ -77,8 +71,6 @@ CREATE TRIGGER trg_wsr_updated
   FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- ─── RLS ──────────────────────────────────────────────────────
--- Visible to any workspace member; mutable only by owner/admin (matches
--- the same pattern as workspace_ai_settings / workspace_members from 071).
 ALTER TABLE workspace_sandbox_settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE workspace_sandbox_settings FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS wss_workspace_member ON workspace_sandbox_settings;
@@ -124,11 +116,15 @@ CREATE POLICY wsr_workspace_member ON workspace_sandbox_rules
   );
 
 -- ─── Ownership safety net ─────────────────────────────────────
--- When this migration is applied as the `doable` user (via
--- `pnpm db:migrate`), these lines are no-ops. When applied as the
--- postgres superuser they transfer ownership so the application user
--- can read/write the new objects without a 42501 error.
-ALTER TABLE workspace_sandbox_settings OWNER TO doable;
-ALTER TABLE workspace_sandbox_rules    OWNER TO doable;
-ALTER TYPE  sandbox_rule_action        OWNER TO doable;
-ALTER TYPE  sandbox_rule_type          OWNER TO doable;
+-- Transfer ownership only when the optional dedicated `doable` role exists.
+-- Railway's PostgreSQL service commonly runs these migrations as `postgres`.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'doable') THEN
+    ALTER TABLE workspace_sandbox_settings OWNER TO doable;
+    ALTER TABLE workspace_sandbox_rules    OWNER TO doable;
+    ALTER TYPE  sandbox_rule_action        OWNER TO doable;
+    ALTER TYPE  sandbox_rule_type          OWNER TO doable;
+  END IF;
+END
+$$;
