@@ -1,0 +1,2 @@
+Trigger Fekra V2 Docker image build after GitHub Actions enablement.
+2026-08-17
