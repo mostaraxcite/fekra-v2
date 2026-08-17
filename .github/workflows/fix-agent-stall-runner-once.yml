@@ -31,9 +31,8 @@ jobs:
           end = src.index("          PY\n", start)
           script = textwrap.dedent(src[start:end])
           old = 'intro = "  return `You are Doable\'s Agent Mode AI. You build complete, working web applications by creating files, editing files, and installing packages. The user sees a live preview that updates in real-time as you make changes.\\\\n\\\\n"'
-          new = '''intro = """  return `You are Doable's Agent Mode AI. You build complete, working web applications by creating files, editing files, and installing packages. The user sees a live preview that updates in real-time as you make changes.
-
-"""'''
+          wanted = "  return `You are Doable's Agent Mode AI. You build complete, working web applications by creating files, editing files, and installing packages. The user sees a live preview that updates in real-time as you make changes." + chr(10) + chr(10)
+          new = "intro = " + repr(wanted)
           if old not in script:
               raise SystemExit('could not patch system prompt matcher in embedded script')
           script = script.replace(old, new, 1)
