@@ -128,6 +128,41 @@ export function friendlyToolMessage(
 }
 
 /**
+ * Resolve the real outcome of a tool call. Some SDK providers report
+ * top-level success=true even when the custom tool returned
+ * { success: false, error: ... }. Nested failure always wins.
+ */
+export function inferToolSuccess(result?: unknown, explicitSuccess?: unknown): boolean {
+  const inspect = (value: unknown, depth: number): boolean | undefined => {
+    if (depth < 0 || value == null) return undefined;
+    if (typeof value === "string") {
+      const t = value.trim();
+      if (t.startsWith("{") && t.endsWith("}") && t.length < 200_000) {
+        try { return inspect(JSON.parse(t), depth - 1); } catch { /* plain text result */ }
+      }
+      return undefined;
+    }
+    if (typeof value !== "object") return undefined;
+    const r = value as Record<string, unknown>;
+    if (r.success === false || r.ok === false || r.isError === true) return false;
+    if (typeof r.error === "string" && r.error.trim() && r.success !== true) return false;
+    for (const key of ["result", "output", "data"]) {
+      if (key in r) {
+        const nested = inspect(r[key], depth - 1);
+        if (nested === false) return false;
+      }
+    }
+    if (r.success === true || r.ok === true) return true;
+    return undefined;
+  };
+  if (explicitSuccess === false) return false;
+  const nested = inspect(result, 3);
+  if (nested === false) return false;
+  if (explicitSuccess === true) return true;
+  return nested !== false;
+}
+
+/**
  * Generate a creator-friendly result message for a completed tool operation.
  * Strips server paths and technical details, keeps it engaging.
  */
@@ -137,7 +172,7 @@ export function friendlyToolResult(
   success?: unknown,
 ): string {
   const lower = (toolName ?? "").toLowerCase();
-  const ok = success !== false;
+  const ok = inferToolSuccess(result, success);
 
   if (!ok) {
     if (lower.includes("build")) return "Build ran into an issue \u2014 working on a fix";
@@ -307,6 +342,9 @@ export function sanitizeText(text: string): string {
   result = result.replace(/<\|?channel\|?>(?:thought)?/gi, "");
   result = result.replace(/<\/?rationale>/gi, "");
   result = result.replace(/<\/?answer>/gi, "");
+  // DeepSeek V3.2/V4 can leak raw DSML protocol tags when provider-side
+  // tool parsing fails. Never expose internal tool-call markup to users.
+  result = result.replace(/<\/?[|｜]DSML[|｜](?:function_calls|tool_calls|invoke|parameter)\b[^>\n]*(?:>|(?=\n))/gi, "");
 
   // 1. Strip absolute server paths
   result = stripServerPaths(result);

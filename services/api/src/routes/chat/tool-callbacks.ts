@@ -274,6 +274,7 @@ function dlog(msg: string) {
 import {
   friendlyToolMessage,
   friendlyToolResult,
+  inferToolSuccess,
 } from "../../ai/tool-messages.js";
 import { extractSseHintPayload } from "../../ai/plan-parser.js";
 
@@ -392,7 +393,8 @@ export function createToolProgressCallbacks(
       const _args = (_argsObj as { arguments?: Record<string, unknown> }).arguments ?? _argsObj;
       state.hadToolCalls = true;
       traceCollector?.onToolEnd(toolName, _args, result);
-      const friendly = friendlyToolResult(toolName, result, true);
+      const success = inferToolSuccess(result);
+      const friendly = friendlyToolResult(toolName, result, success);
       const ea = _args;
       const endPath =
         (ea.path as string | undefined) ??
@@ -437,7 +439,7 @@ export function createToolProgressCallbacks(
         type: "tool_result",
         data: {
           name: toolName,
-          success: true,
+          success,
           friendlyMessage: friendly,
           ...(persistedPath ? { path: persistedPath } : endPath ? { path: endPath } : {}),
           ...(collectedArtifacts.length > 0 ? { artifacts: collectedArtifacts } : {}),

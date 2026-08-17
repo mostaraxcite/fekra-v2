@@ -138,7 +138,7 @@ function maybeRewriteToolArgs(
 
 // File-write tools whose content we inspect for inbuilt-DB persistence misuse.
 const FILE_WRITE_TOOLS = new Set([
-  "create_file", "edit_file", "write", "create", "str_replace_editor", "str_replace", "multi_edit",
+  "create_file", "create_files", "edit_file", "write", "create", "str_replace_editor", "str_replace", "multi_edit",
 ]);
 
 /**
@@ -169,7 +169,7 @@ function denyDataStoreMisuse(
     else if (depth > 0 && Array.isArray(v)) for (const x of v) collect(x, depth - 1);
     else if (depth > 0 && v && typeof v === "object") for (const x of Object.values(v)) collect(x, depth - 1);
   };
-  collect(a, 2);
+  collect(a, 3);
   const content = strings.join("\n");
   if (!content) return undefined;
   const usesPglite = /@electric-sql\/pglite|new\s+PGlite\s*\(/.test(content);
@@ -470,7 +470,12 @@ export class CopilotEngine {
     // presentation rendering.  Use a much longer timeout while a tool is
     // in-flight so we don't falsely abort.
     const TOOL_EXEC_TIMEOUT_MS = 600_000; // 10 min
-    let lastProgressTime = Date.now();
+    // Absolute budget for MODEL LOOP time. A turn that keeps emitting events
+    // must still terminate instead of running forever. Active tools are exempt
+    // so long render/build operations are not killed mid-execution.
+    const TURN_TIMEOUT_MS = Math.max(60_000, Number(process.env.AI_TURN_MAX_MS) || 240_000);
+    const turnStartedAt = Date.now();
+    let lastProgressTime = turnStartedAt;
     let gotFirstEvent = false;
     let activeToolCount = 0; // tracks nested / concurrent tool executions
     const sid = sessionId.slice(0, 8);
@@ -500,6 +505,16 @@ export class CopilotEngine {
         if (this.abortedSessions.has(sessionId)) {
           try { onEvent?.({ type: "session.idle", data: { reason: "aborted" } } as unknown as SessionEvent); } catch {}
           finish(); return;
+        }
+        const totalElapsed = Date.now() - turnStartedAt;
+        if (activeToolCount === 0 && totalElapsed > TURN_TIMEOUT_MS) {
+          const message = `AI turn exceeded ${Math.round(TURN_TIMEOUT_MS / 1000)}s total runtime and was stopped so the editor cannot hang indefinitely.`;
+          console.warn(`[CopilotEngine] hard turn timeout (${sid}…) elapsed=${totalElapsed}ms`);
+          try { onEvent?.({ type: "session.error", data: { message } } as SessionEvent); } catch {}
+          this.abortedSessions.add(sessionId);
+          void engine.abort().catch(() => {});
+          finish(new Error(message));
+          return;
         }
         const since = Date.now() - lastProgressTime;
         const timeout = activeToolCount > 0

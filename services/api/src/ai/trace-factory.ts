@@ -13,6 +13,7 @@ import {
 import { SpanKind, SpanStatusCode, type Span, type Attributes } from "@opentelemetry/api";
 import { getTracer } from "../tracing/instrumentation.js";
 import { scrubSecrets } from "../tracing/secret-patterns.js";
+import { inferToolSuccess } from "./tool-messages.js";
 
 // Map a chat_traces event type + payload to OTel-conventional attributes.
 // Returns null to skip emitting the event (high-volume noise types).
@@ -289,7 +290,7 @@ export function createTraceCollector(ctx: TraceCollectorContext) {
     }
     if (matchedKey) activeTools.delete(matchedKey);
     const dur = durationMs ?? (matchedStart ? Date.now() - matchedStart : undefined);
-    push("tool_end", { name, tool_key: matchedKey, duration_ms: dur, result, success: result !== null && result !== undefined });
+    push("tool_end", { name, tool_key: matchedKey, duration_ms: dur, result, success: inferToolSuccess(result) });
   }
 
   function onTextDelta(text: string): void {

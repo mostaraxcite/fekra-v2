@@ -3,7 +3,7 @@
  * Also exports ChannelTokenRouter for model thinking/reasoning tag parsing.
  */
 
-import { sanitizeText, stripServerPaths, friendlyToolResult } from "./tool-messages.js";
+import { sanitizeText, stripServerPaths, friendlyToolResult, inferToolSuccess } from "./tool-messages.js";
 
 export interface SSEEvent {
   type: string;
@@ -33,6 +33,8 @@ export class ChannelTokenRouter {
   private inThinking = false;
   /** True when we're inside a tool call block */
   private inTool = false;
+  /** True while suppressing leaked DeepSeek DSML tool protocol. */
+  private inDsmlTool = false;
   /** Buffer for potential partial opening/closing markers */
   private buffer = "";
   /** Track whether any text has been emitted yet (for distilled model detection) */
@@ -43,8 +45,12 @@ export class ChannelTokenRouter {
   private static THINK_CLOSE_RE = /<\/think>|<\/rationale>|<\|?channel\|?>/i;
   private static TOOL_OPEN_RE = /<function\b[^>]*>/i;
   private static TOOL_CLOSE_RE = /<\/function>/i;
+  private static DSML_OPEN_RE = /<[|｜]DSML[|｜](?:function_calls|tool_calls)\b[^>\n]*>?/i;
+  private static DSML_CLOSE_RE = /<\/[|｜]DSML[|｜](?:function_calls|tool_calls)\s*>/i;
 
-  private static PARTIAL_MARKER_RE = /<(?:\/?[a-z|!]*|\|?[a-z|]*)$/i;
+  // Includes the full-width pipe used by DeepSeek DSML plus underscores,
+  // so split protocol markers are buffered instead of leaking token-by-token.
+  private static PARTIAL_MARKER_RE = /<(?:\/?[a-z0-9_|｜!:\-]*|[|｜]?[a-z0-9_|｜!:\-]*)$/i;
 
   private static ANSWER_RE = /<\/?answer>/gi;
 
@@ -60,7 +66,21 @@ export class ChannelTokenRouter {
     let remaining = input.replace(ChannelTokenRouter.ANSWER_RE, "");
 
     while (remaining.length > 0) {
-      if (this.inThinking) {
+      if (this.inDsmlTool) {
+        const closeIdx = remaining.search(ChannelTokenRouter.DSML_CLOSE_RE);
+        if (closeIdx === -1) {
+          // Discard DSML body. Preserve only a trailing partial marker so a
+          // split closing token can be recognized on the next delta.
+          const trailing = remaining.match(ChannelTokenRouter.PARTIAL_MARKER_RE);
+          this.buffer = trailing?.[0] ?? "";
+          remaining = "";
+        } else {
+          const match = remaining.slice(closeIdx).match(ChannelTokenRouter.DSML_CLOSE_RE);
+          remaining = remaining.slice(closeIdx + (match ? match[0].length : 1));
+          if (remaining.startsWith("\n")) remaining = remaining.slice(1);
+          this.inDsmlTool = false;
+        }
+      } else if (this.inThinking) {
         const closeIdx = remaining.search(ChannelTokenRouter.THINK_CLOSE_RE);
         if (closeIdx === -1) {
           remaining = this.handlePartial(remaining, ChannelTokenRouter.THINK_CLOSE_RE, "thinking", results);
@@ -88,10 +108,23 @@ export class ChannelTokenRouter {
         // Look for any opening tag or thinking close (for distilled models)
         const thinkOpenIdx = remaining.search(ChannelTokenRouter.THINK_OPEN_RE);
         const toolOpenIdx = remaining.search(ChannelTokenRouter.TOOL_OPEN_RE);
+        const dsmlOpenIdx = remaining.search(ChannelTokenRouter.DSML_OPEN_RE);
         const thinkOrphanCloseIdx = remaining.search(ChannelTokenRouter.THINK_CLOSE_RE);
 
+        // Priority 0: leaked DeepSeek DSML is internal protocol, never UI text.
+        if (dsmlOpenIdx !== -1 && (thinkOpenIdx === -1 || dsmlOpenIdx < thinkOpenIdx) && (toolOpenIdx === -1 || dsmlOpenIdx < toolOpenIdx)) {
+          const before = remaining.slice(0, dsmlOpenIdx);
+          if (before) {
+            results.push({ type: "text", content: before });
+            this.hasEmittedText = true;
+          }
+          const match = remaining.slice(dsmlOpenIdx).match(ChannelTokenRouter.DSML_OPEN_RE);
+          remaining = remaining.slice(dsmlOpenIdx + (match ? match[0].length : 1));
+          if (remaining.startsWith("\n")) remaining = remaining.slice(1);
+          this.inDsmlTool = true;
+        }
         // Priority 1: Tool Open
-        if (toolOpenIdx !== -1 && (thinkOpenIdx === -1 || toolOpenIdx < thinkOpenIdx)) {
+        else if (toolOpenIdx !== -1 && (thinkOpenIdx === -1 || toolOpenIdx < thinkOpenIdx)) {
           const before = remaining.slice(0, toolOpenIdx);
           if (before) {
             results.push({ type: "text", content: before });
@@ -167,6 +200,7 @@ export class ChannelTokenRouter {
     if (!this.buffer) return [];
     const content = this.buffer;
     this.buffer = "";
+    if (this.inDsmlTool || /[|｜]DSML[|｜]/i.test(content)) return [];
     const type = this.inThinking ? "thinking" : this.inTool ? "tool" : "text";
     return [{ type, content }];
   }
@@ -206,7 +240,7 @@ export function mapEventToSSE(event: Record<string, unknown>): SSEEvent | null {
     case "assistant.reasoning_delta": {
       const reasoningDelta = (data?.deltaContent ?? "") as string;
       if (!reasoningDelta) return null;
-      return { type: "thinking", data: stripServerPaths(reasoningDelta) };
+      return { type: "thinking", data: sanitizeText(stripServerPaths(reasoningDelta)) };
     }
 
     // ─── Final reasoning block ────────────────────────────
@@ -215,7 +249,7 @@ export function mapEventToSSE(event: Record<string, unknown>): SSEEvent | null {
 
     // ─── Thinking / reasoning (legacy events) ─────────────
     case "assistant.thinking":
-      return { type: "thinking", data: stripServerPaths(String(data?.content ?? "")) };
+      return { type: "thinking", data: sanitizeText(stripServerPaths(String(data?.content ?? ""))) };
 
     // ─── Tool calls (starting) ────────────────────────────
     case "tool.running":
@@ -256,12 +290,13 @@ export function mapEventToSSE(event: Record<string, unknown>): SSEEvent | null {
         ? (rawReqArgs as { arguments: Record<string, unknown> }).arguments
         : rawReqArgs;
       const reqPath = (reqArgs?.path ?? reqArgs?.filePath ?? reqArgs?.file ?? reqArgs?.target) as string | undefined;
+      const effectiveSuccess = inferToolSuccess(data?.result, data?.success);
       return {
         type: "tool_result",
         data: {
           name: resultToolName,
-          success: data?.success,
-          friendlyMessage: friendlyToolResult(resultToolName, data?.result, data?.success),
+          success: effectiveSuccess,
+          friendlyMessage: friendlyToolResult(resultToolName, data?.result, effectiveSuccess),
           // Pass through request args so the client can label cards with the
           // correct file name (BUG: "Reading file" instead of "Reading App.tsx").
           ...(reqArgs ? { args: reqArgs } : {}),

@@ -199,6 +199,77 @@ export function createDoableTools(projectId: string, userId?: string, workspaceI
       },
     }),
 
+    defineTool("create_files", {
+    description: "Create or overwrite multiple project files in ONE call. Use this whenever a task needs 2+ new files. Batch 3-5 related files per call (maximum 8) instead of making one model turn per file. Every item needs relative `path` and full `content`. The entire batch is syntax-validated before any file is written.",
+    parameters: {
+      type: "object" as const,
+      properties: {
+        files: {
+          type: "array" as const,
+          minItems: 1,
+          maxItems: 8,
+          items: {
+            type: "object" as const,
+            properties: {
+              path: { type: "string" as const, description: "Project-relative path, e.g. src/pages/Dashboard.tsx" },
+              content: { type: "string" as const, description: "Complete file contents" },
+            },
+            required: ["path", "content"] as const,
+          },
+        },
+      },
+      required: ["files"] as const,
+    },
+    handler: async (args: { files: Array<{ path: string; content: string }> }) => {
+      if (!Array.isArray(args.files) || args.files.length < 1 || args.files.length > 8) {
+        return { success: false, error: "create_files requires 1-8 files." };
+      }
+      const frameworkId = await getProjectFramework(projectId);
+      const guard = await getConfigGuard(projectId);
+      const tanstack = detectTanStackStart(getProjectPath(projectId));
+      const seen = new Set<string>();
+      const prepared: Array<{ path: string; content: string; overwritten: boolean }> = [];
+
+      for (const item of args.files) {
+        const filePath = normalizePath(projectId, item.path, frameworkId);
+        if (seen.has(filePath)) return { success: false, error: `Duplicate path in create_files batch: ${filePath}` };
+        seen.add(filePath);
+        if (guard.isLocked(filePath)) {
+          return { success: false, error: `Cannot create ${filePath} — server-side config files are locked by dovault for security.` };
+        }
+        if (tanstack) {
+          let currentContent: string | undefined;
+          try { currentContent = await readFile(projectId, filePath); } catch { /* new file */ }
+          const violation = tanStackHijackViolation(filePath, item.content, currentContent);
+          if (violation) return { success: false, error: violation };
+        }
+        const syntaxCheck = validateFileSyntax(filePath, item.content);
+        if (!syntaxCheck.ok) {
+          return {
+            success: false,
+            error: `Syntax error in ${filePath}: ${syntaxCheck.message}\nNo files from this batch were written. Fix the syntax and retry create_files.`,
+          };
+        }
+        prepared.push({
+          path: filePath,
+          content: item.content,
+          overwritten: existsSync(path.join(getProjectPath(projectId), filePath)),
+        });
+      }
+
+      emitToolEvent(projectId, "create_files", "start", { count: prepared.length, paths: prepared.map((f) => f.path) });
+      for (const file of prepared) await writeFile(projectId, file.path, file.content);
+      emitToolEvent(projectId, "create_files", "end", { count: prepared.length, paths: prepared.map((f) => f.path) });
+      return {
+        success: true,
+        count: prepared.length,
+        paths: prepared.map((f) => f.path),
+        files: prepared.map((f) => ({ path: f.path, overwritten: f.overwritten, size: Buffer.byteLength(f.content, "utf-8") })),
+        message: `Created/updated ${prepared.length} files in one batch`,
+      };
+    },
+  }),
+
     defineTool("edit_file", {
       description: "Replace the entire content of an existing file. Required fields are `path` (RELATIVE, e.g. 'index.html') and `content` (the full new file body). Do NOT use `file_text` — this tool uses `content`. Do NOT pass `command`. Read the file first, then write the complete updated content.",
       parameters: {

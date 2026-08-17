@@ -17,7 +17,7 @@ const MAX_READ_ONLY_CYCLES = 3;
 // truly stuck turns while not killing the legitimate visual-edit "explore
 // then edit" pattern.
 const MAX_READ_ONLY_CYCLES_VISUAL_EDIT = 5;
-const FILE_WRITE_TOOLS = new Set(["create_file", "edit_file", "write_file", "create", "edit", "write"]);
+const FILE_WRITE_TOOLS = new Set(["create_file", "create_files", "edit_file", "write_file", "create", "edit", "write"]);
 const READ_TOOLS = new Set(["read_file", "list_files", "search_files", "read", "list", "search"]);
 
 /**
