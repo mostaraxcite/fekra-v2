@@ -353,7 +353,7 @@ export function generatePlatformViteConfig(
     !rawDomain.includes("localhost") &&
     !rawDomain.startsWith("127.") &&
     !rawDomain.startsWith("0.");
-  const safePath = JSON.stringify(`/preview/${projectId}/__hmr`);
+  const safePath = JSON.stringify(`/__hmr`);
 
   if (!isPublic) {
     // Dev host — let Vite use its default `hmr: true` so the same-port WS
