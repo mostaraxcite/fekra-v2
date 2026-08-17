@@ -1,0 +1,185 @@
+name: Fekra V2 Railway browser smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fekra-v2-bootstrap
+    paths:
+      - '.github/workflows/e2e-railway-smoke.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  browser-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      FEKRA_WEB_URL: https://web-production-bc2cf.up.railway.app
+      FEKRA_API_URL: https://api-production-410d.up.railway.app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: fekra-v2-bootstrap
+
+      - name: Install Playwright
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/fekra-e2e
+          cd /tmp/fekra-e2e
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Run real browser journey
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/e2e-artifacts"
+          cat > /tmp/fekra-e2e/smoke.cjs <<'EOF'
+          const { chromium } = require('playwright');
+          const fs = require('fs');
+          const path = require('path');
+
+          const WEB = process.env.FEKRA_WEB_URL;
+          const API = process.env.FEKRA_API_URL;
+          const ART = path.join(process.env.GITHUB_WORKSPACE, 'e2e-artifacts');
+          const stamp = Date.now();
+          const email = `fekra.e2e.${stamp}@example.com`;
+          const password = 'FekraV2!Test2026';
+          const prompt = 'Build a complete modern fitness landing page with a hero section, training programs, pricing cards, testimonials, and a contact call to action. Use responsive React UI.';
+          const events = [];
+
+          function record(type, data) {
+            const row = { at: new Date().toISOString(), type, ...data };
+            events.push(row);
+            console.log(`[E2E:${type}]`, JSON.stringify(data));
+          }
+
+          async function snap(page, name) {
+            await page.screenshot({ path: path.join(ART, `${name}.png`), fullPage: true });
+          }
+
+          (async () => {
+            fs.mkdirSync(ART, { recursive: true });
+            const browser = await chromium.launch({ headless: true });
+            const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+            await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+            const page = await context.newPage();
+
+            page.on('console', msg => record('console', { level: msg.type(), text: msg.text() }));
+            page.on('pageerror', err => record('pageerror', { message: err.message }));
+            page.on('requestfailed', req => record('requestfailed', { method: req.method(), url: req.url(), failure: req.failure()?.errorText || 'unknown' }));
+            page.on('response', res => {
+              const url = res.url();
+              if (res.status() >= 400 || url.startsWith(API)) {
+                record('response', { status: res.status(), method: res.request().method(), url });
+              }
+            });
+
+            let stage = 'bootstrap';
+            try {
+              stage = 'health';
+              const health = await context.request.get(`${API}/health`);
+              record('api-health', { status: health.status(), ok: health.ok() });
+              if (!health.ok()) throw new Error(`API health failed: ${health.status()}`);
+
+              stage = 'signup-page';
+              await page.goto(`${WEB}/signup`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+              await page.getByRole('heading', { name: 'Create your account' }).waitFor({ timeout: 20000 });
+              await snap(page, '01-signup');
+
+              stage = 'signup-submit';
+              await page.locator('#displayName').fill('Fekra E2E');
+              await page.locator('#email').fill(email);
+              await page.locator('#password').fill(password);
+              await page.locator('#confirmPassword').fill(password);
+              await page.locator('#terms').check();
+              await page.getByRole('button', { name: 'Create account' }).click();
+
+              const outcome = await Promise.race([
+                page.waitForURL(/\/dashboard(?:\?|$)/, { timeout: 30000 }).then(() => 'dashboard'),
+                page.getByText("You're on the list").waitFor({ timeout: 30000 }).then(() => 'pending'),
+                page.locator('form .bg-red-50, form .text-red-600').first().waitFor({ timeout: 30000 }).then(() => 'error'),
+              ]).catch(() => 'timeout');
+              record('signup-outcome', { outcome, url: page.url(), email });
+              await snap(page, '02-signup-outcome');
+
+              if (outcome === 'pending') {
+                const text = await page.locator('body').innerText();
+                throw new Error(`Signup requires admin approval. Page says: ${text.slice(0, 800)}`);
+              }
+              if (outcome === 'error') {
+                const text = await page.locator('body').innerText();
+                throw new Error(`Signup UI error. Page says: ${text.slice(0, 800)}`);
+              }
+              if (outcome !== 'dashboard') {
+                throw new Error(`Signup did not reach dashboard; current URL=${page.url()}`);
+              }
+
+              stage = 'dashboard';
+              const promptBox = page.locator('textarea').first();
+              await promptBox.waitFor({ state: 'visible', timeout: 30000 });
+              await snap(page, '03-dashboard');
+
+              stage = 'create-project';
+              await promptBox.fill(prompt);
+              await promptBox.press('Enter');
+              await page.waitForURL(/\/editor\/[0-9a-f-]{20,}/i, { timeout: 45000 });
+              const editorUrl = page.url();
+              record('editor-reached', { url: editorUrl });
+              await page.waitForLoadState('domcontentloaded');
+              await page.waitForTimeout(5000);
+              await snap(page, '04-editor');
+
+              stage = 'generation-observe';
+              // Give the real AI bridge time to connect and surface its first result/failure.
+              await page.waitForTimeout(25000);
+              const body = (await page.locator('body').innerText()).replace(/\s+/g, ' ').trim();
+              record('editor-body', { excerpt: body.slice(0, 3000) });
+              await snap(page, '05-after-generation-wait');
+
+              const fatalSignals = [
+                /failed to (?:connect|create|generate)/i,
+                /no ai provider/i,
+                /provider.*not configured/i,
+                /unauthorized/i,
+                /internal server error/i,
+                /something went wrong/i,
+              ];
+              const matched = fatalSignals.find(re => re.test(body));
+              if (matched) throw new Error(`Generation surfaced fatal UI signal ${matched}: ${body.slice(0, 1800)}`);
+
+              const badApi = events.filter(e => e.type === 'response' && e.status >= 500);
+              if (badApi.length) throw new Error(`Server returned ${badApi.length} HTTP 5xx response(s).`);
+
+              record('success', { email, editorUrl, stage: 'editor-generation-observed' });
+            } catch (err) {
+              record('failure', { stage, message: err?.stack || String(err), url: page.url() });
+              try { await snap(page, `FAIL-${stage}`); } catch {}
+              throw err;
+            } finally {
+              fs.writeFileSync(path.join(ART, 'events.json'), JSON.stringify(events, null, 2));
+              fs.writeFileSync(path.join(ART, 'result.txt'), `email=${email}\nlastUrl=${page.url()}\n`);
+              await context.tracing.stop({ path: path.join(ART, 'trace.zip') }).catch(() => {});
+              await browser.close();
+            }
+          })().catch(err => {
+            console.error(err);
+            process.exit(1);
+          });
+          EOF
+          cd /tmp/fekra-e2e
+          node smoke.cjs
+
+      - name: Upload browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fekra-v2-railway-e2e-${{ github.run_id }}
+          path: e2e-artifacts
+          if-no-files-found: warn
+          retention-days: 7
