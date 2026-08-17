@@ -1,10 +1,9 @@
 # ==============================================================================
-# Publish Doable Docker images to GitHub Container Registry (ghcr.io)
+# Publish Fekra V2 / Doable Docker images
 # ==============================================================================
-# Fekra V2 bootstrap:
-# - pushes to fekra-v2-bootstrap publish :latest images owned by this fork
-# - version tags publish both the version and :latest
-# - manual workflow_dispatch remains supported
+# Durable images go to GHCR. Bootstrap branch builds also publish an anonymous
+# 24-hour ttl.sh copy so Railway smoke tests do not depend on GHCR package
+# visibility or registry credentials.
 # ==============================================================================
 
 name: Publish Docker images
@@ -24,6 +23,7 @@ permissions:
 env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/doable
+  SMOKE_PREFIX: ttl.sh/fekra-v2-c7d4a81e
 
 jobs:
   publish:
@@ -55,8 +55,9 @@ jobs:
             echo "tags=${IMAGE}:${VERSION},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
             echo "Building ${IMAGE}:${VERSION} (+ :latest)"
           else
-            echo "tags=${IMAGE}:latest" >> "$GITHUB_OUTPUT"
-            echo "Building ${IMAGE}:latest"
+            SMOKE_IMAGE="${SMOKE_PREFIX}-${{ matrix.target }}:24h"
+            echo "tags=${IMAGE}:latest,${SMOKE_IMAGE}" >> "$GITHUB_OUTPUT"
+            echo "Building ${IMAGE}:latest + ${SMOKE_IMAGE}"
           fi
 
       - name: Build and push ${{ matrix.target }}
