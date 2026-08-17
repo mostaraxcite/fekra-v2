@@ -105,9 +105,28 @@ export async function apiCreateProject(data: {
   frameworkId?: string;
   folderId?: string;
 }): Promise<{ data: ApiProject }> {
+  let workspaceId = data.workspaceId;
+
+  // A freshly registered user can reach the dashboard before the workspace
+  // switcher has persisted its active workspace in localStorage. Project
+  // creation must not race that asynchronous bootstrap: resolve the user's
+  // first available workspace from the API when no active id was supplied.
+  if (!workspaceId) {
+    const workspaces = await apiFetch<{ data: Array<{ id: string }> }>("/workspaces");
+    workspaceId = workspaces.data[0]?.id;
+
+    if (!workspaceId) {
+      throw new Error("No workspace is available for this account yet. Please refresh and try again.");
+    }
+
+    if (typeof window !== "undefined") {
+      localStorage.setItem("doable_active_workspace_id", workspaceId);
+    }
+  }
+
   return apiFetch("/projects", {
     method: "POST",
-    body: JSON.stringify(data),
+    body: JSON.stringify({ ...data, workspaceId }),
   });
 }
 
