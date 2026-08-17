@@ -1,0 +1,3 @@
+FROM smoke-registry-production.up.railway.app/fekra-v2-migrate:latest
+WORKDIR /app
+CMD ["npx", "tsx", "services/api/src/db/reconcile-fekra-owner.ts"]
