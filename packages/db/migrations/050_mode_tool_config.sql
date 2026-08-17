@@ -7,7 +7,15 @@ CREATE TABLE IF NOT EXISTS mode_tool_config (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-GRANT ALL PRIVILEGES ON mode_tool_config TO doable;
+-- `doable` is optional on self-hosted databases. Railway's PostgreSQL
+-- deployment uses `postgres`, so only grant to the dedicated role when present.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'doable') THEN
+    GRANT ALL PRIVILEGES ON TABLE mode_tool_config TO doable;
+  END IF;
+END
+$$;
 
 -- Seed defaults matching current hardcoded tool sets
 INSERT INTO mode_tool_config (mode, allowed_tools, description) VALUES
