@@ -8,8 +8,8 @@ CREATE TABLE IF NOT EXISTS email_queue (
   html TEXT NOT NULL,
   text_body TEXT,
   from_address TEXT,
-  template TEXT,              -- e.g. 'password-reset', 'welcome', 'invite'
-  template_data JSONB,        -- original template data for debugging/reprocessing
+  template TEXT,
+  template_data JSONB,
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending', 'processing', 'sent', 'failed', 'dead')),
   attempts INT NOT NULL DEFAULT 0,
@@ -21,12 +21,19 @@ CREATE TABLE IF NOT EXISTS email_queue (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Index for the queue worker: pick pending/failed emails due for retry
 CREATE INDEX IF NOT EXISTS idx_email_queue_pending
   ON email_queue (next_retry_at)
   WHERE status IN ('pending', 'failed');
 
--- Index for cleanup/monitoring
 CREATE INDEX IF NOT EXISTS idx_email_queue_status ON email_queue (status);
 
-GRANT ALL PRIVILEGES ON email_queue TO doable;
+-- Some self-hosted installs create a dedicated `doable` DB role, while
+-- Railway's PostgreSQL deployment uses `postgres`. Grant only when that
+-- optional compatibility role exists so the migration is portable.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'doable') THEN
+    GRANT ALL PRIVILEGES ON TABLE email_queue TO doable;
+  END IF;
+END
+$$;
