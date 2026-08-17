@@ -13,4 +13,14 @@ CREATE TABLE IF NOT EXISTS project_files (
 
 CREATE INDEX IF NOT EXISTS idx_project_files_project_id ON project_files(project_id);
 
-GRANT ALL PRIVILEGES ON project_files TO doable;
+-- Some self-hosted deployments create a dedicated `doable` database role,
+-- while Railway and other managed PostgreSQL setups may use only the service
+-- user (for example `postgres`). Keep the grant where that role exists without
+-- making the migration fail on otherwise valid installations.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'doable') THEN
+    GRANT ALL PRIVILEGES ON project_files TO doable;
+  END IF;
+END
+$$;
