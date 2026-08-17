@@ -35,15 +35,21 @@ function configIsSealed(value: unknown): boolean {
 /**
  * Promote the first-ever account to platform owner.
  *
- * If a previous first-signup request crashed after inserting the user but
- * before completing bootstrap, a later invocation repairs that situation by
- * promoting the actual earliest user rather than the later caller. The return
- * value reports whether `newUserId` itself was promoted.
+ * The second argument remains backward-compatible with old Doable call sites
+ * that used to pass an install bootstrap token. String/null values are ignored
+ * completely; they can never elevate a later account. New call sites may pass
+ * BootstrapContext directly as the second argument.
  */
 export async function firstUserBootstrap(
   newUserId: string,
-  ctx?: BootstrapContext,
+  legacyTokenOrContext?: string | null | BootstrapContext,
+  legacyContext?: BootstrapContext,
 ): Promise<BootstrapResult> {
+  const ctx: BootstrapContext | undefined =
+    typeof legacyTokenOrContext === "object" && legacyTokenOrContext !== null
+      ? legacyTokenOrContext
+      : legacyContext;
+
   let promotedUserId: string | null = null;
   let callerWasPromoted = false;
   let resultReason = "not_first_user";
@@ -91,9 +97,6 @@ export async function firstUserBootstrap(
       WHERE id = ${firstUser.id}::uuid
     `;
 
-    // These updates are no-ops if the first user's workspace/credit row has
-    // not been created yet; normal signup invokes bootstrap after workspace
-    // creation, so the standard path receives owner entitlements immediately.
     await tx`
       UPDATE credit_balances
       SET daily_credits    = 999999,
@@ -114,7 +117,6 @@ export async function firstUserBootstrap(
     `;
 
     // Seal automatic promotion in the SAME transaction as the role update.
-    // This prevents a crash from leaving an owner promotion without a seal.
     const sealedAtJson = JSON.stringify(new Date().toISOString());
     await tx`
       INSERT INTO platform_config (key, value, updated_by, updated_at)
@@ -130,7 +132,6 @@ export async function firstUserBootstrap(
             updated_at = now()
     `;
 
-    // Keep the audit row atomic with the promotion when the table is available.
     try {
       await tx`
         INSERT INTO admin_audit_log
@@ -150,7 +151,6 @@ export async function firstUserBootstrap(
         WHERE u.id = ${firstUser.id}::uuid
       `;
     } catch (err) {
-      // Audit logging must not make the first account unusable on an older DB.
       console.warn("[firstUserBootstrap] audit INSERT failed:", err);
     }
   });
