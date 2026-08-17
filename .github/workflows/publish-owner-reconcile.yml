@@ -1,0 +1,32 @@
+name: Publish owner reconciliation image
+
+on:
+  push:
+    branches:
+      - fekra-v2-bootstrap
+    paths:
+      - 'deployment/docker/Dockerfile.owner-reconcile'
+      - '.github/workflows/publish-owner-reconcile.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push one-off image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deployment/docker/Dockerfile.owner-reconcile
+          push: true
+          tags: smoke-registry-production.up.railway.app/fekra-v2-owner-reconcile:latest
+          provenance: false
