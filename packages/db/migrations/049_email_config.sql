@@ -6,38 +6,28 @@
 
 CREATE TABLE IF NOT EXISTS email_config (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-
-  -- Provider type: 'smtp', 'resend', 'google'
   provider TEXT NOT NULL CHECK (provider IN ('smtp', 'resend', 'google')),
-
-  -- Human-readable label (e.g. "Gmail via OAuth", "Resend Production")
   label TEXT NOT NULL DEFAULT '',
-
-  -- From address
   from_address TEXT NOT NULL DEFAULT 'Doable <noreply@doable.me>',
-
-  -- All sensitive config is JSON-encrypted as one blob.
-  -- SMTP: { host, port, user, pass, service }
-  -- Resend: { apiKey }
-  -- Google: { clientId, clientSecret, refreshToken, emailUser }
   credentials_encrypted BYTEA NOT NULL,
-
-  -- Whether this config is currently active
   is_active BOOLEAN NOT NULL DEFAULT true,
-
-  -- Status after last verification
   verified BOOLEAN NOT NULL DEFAULT false,
   last_verified_at TIMESTAMPTZ,
   last_error TEXT,
-
-  -- Who configured this
   configured_by UUID REFERENCES users(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Only one active config at a time
 CREATE UNIQUE INDEX IF NOT EXISTS idx_email_config_active
   ON email_config (is_active) WHERE is_active = true;
 
-GRANT ALL PRIVILEGES ON email_config TO doable;
+-- `doable` is an optional dedicated database role. Railway's deployment
+-- connects as `postgres`, so do not make schema creation depend on that role.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'doable') THEN
+    GRANT ALL PRIVILEGES ON TABLE email_config TO doable;
+  END IF;
+END
+$$;
