@@ -1,26 +1,18 @@
 # ==============================================================================
 # Publish Doable Docker images to GitHub Container Registry (ghcr.io)
 # ==============================================================================
-# Triggers:
-#   - push of a version tag like `v1.2.3` → publishes :v1.2.3 AND :latest
-#   - manual workflow_dispatch (for one-off rebuilds, publishes :latest only)
-#
-# Images published:
-#   - ghcr.io/doable-me/doable-api:<tag>
-#   - ghcr.io/doable-me/doable-ws:<tag>
-#   - ghcr.io/doable-me/doable-web:<tag>
-#   - ghcr.io/doable-me/doable-migrate:<tag>
-#
-# The web image is built WITHOUT NEXT_PUBLIC_* build args so its client
-# bundle keeps the __DOABLE_*_URL__ placeholders. The container's runtime
-# entrypoint (deployment/docker/web-runtime-entrypoint.sh) sed-replaces them at start
-# with the operator's actual URLs from env. One image works for any URL.
+# Fekra V2 bootstrap:
+# - pushes to fekra-v2-bootstrap publish :latest images owned by this fork
+# - version tags publish both the version and :latest
+# - manual workflow_dispatch remains supported
 # ==============================================================================
 
 name: Publish Docker images
 
 on:
   push:
+    branches:
+      - fekra-v2-bootstrap
     tags:
       - 'v*.*.*'
   workflow_dispatch:
@@ -37,9 +29,6 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     strategy:
-      # Build each target serially — they share the same `deps` and `build`
-      # stages via buildx cache, so back-to-back builds are nearly free after
-      # the first. Parallel would multiply the cache-miss cost.
       fail-fast: false
       matrix:
         target: [api, ws, web, migrate]
@@ -67,7 +56,7 @@ jobs:
             echo "Building ${IMAGE}:${VERSION} (+ :latest)"
           else
             echo "tags=${IMAGE}:latest" >> "$GITHUB_OUTPUT"
-            echo "Building ${IMAGE}:latest only (manual dispatch)"
+            echo "Building ${IMAGE}:latest"
           fi
 
       - name: Build and push ${{ matrix.target }}
@@ -78,10 +67,6 @@ jobs:
           target: ${{ matrix.target }}
           push: true
           tags: ${{ steps.tags.outputs.tags }}
-          # Cache layers between matrix runs + across workflow invocations
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
-          # Intentionally NOT passing NEXT_PUBLIC_* build args for the web
-          # target — we want placeholders baked into the bundle so the
-          # runtime entrypoint can rewrite them per-deployment.
           provenance: false
