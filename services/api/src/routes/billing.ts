@@ -110,7 +110,7 @@ billingRoutes.post("/webhook", async (c) => {
       const plan = PLANS.find(
         (p) =>
           p.stripePriceIdMonthly === priceId || p.stripePriceIdYearly === priceId
-      );
+      ) ?? getPlanById(sub.metadata?.planId ?? "");
 
       await billing.upsertSubscription({
         workspaceId,
@@ -476,7 +476,7 @@ billingRoutes.post("/subscribe", async (c) => {
 
   const priceId =
     interval === "yearly" ? plan.stripePriceIdYearly : plan.stripePriceIdMonthly;
-  if (!priceId) {
+  if (!priceId && planId !== "pro") {
     return c.json({ error: "Price not configured for this plan" }, 400);
   }
 
@@ -496,8 +496,15 @@ billingRoutes.post("/subscribe", async (c) => {
   const origin = c.req.header("origin") ?? "http://localhost:3000";
   const session = await createCheckoutSession({
     customerId,
-    priceId,
+    priceId: planId === "pro" ? undefined : priceId,
     workspaceId,
+    planId,
+    priceData: planId === "pro" ? {
+      currency: "sar",
+      unitAmount: interval === "yearly" ? 72000 : 7500,
+      interval: interval === "yearly" ? "year" : "month",
+      productName: interval === "yearly" ? "فكرة احترافي — سنوي" : "فكرة احترافي — شهري",
+    } : undefined,
     successUrl: `${origin}/billing?success=true`,
     cancelUrl: `${origin}/billing?canceled=true`,
   });
