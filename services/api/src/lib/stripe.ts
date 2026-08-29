@@ -43,7 +43,7 @@ export const PLANS: PlanDefinition[] = [
       "3 projects",
       "5 daily AI credits",
       "Community support",
-      "Doable subdomain",
+      "Fekra subdomain",
     ],
     dailyCredits: 5,
     monthlyCredits: 0,
@@ -54,8 +54,8 @@ export const PLANS: PlanDefinition[] = [
     id: "pro",
     name: "Pro",
     description: "For professionals and small teams",
-    priceMonthly: 25,
-    priceYearly: 240,
+    priceMonthly: 75,
+    priceYearly: 720,
     stripePriceIdMonthly: process.env.STRIPE_PRO_MONTHLY_PRICE_ID ?? "",
     stripePriceIdYearly: process.env.STRIPE_PRO_YEARLY_PRICE_ID ?? "",
     features: [
@@ -125,20 +125,47 @@ export function getPlanById(planId: string): PlanDefinition | undefined {
 // ─── Checkout Session ──────────────────────────────────────
 export async function createCheckoutSession(opts: {
   customerId: string;
-  priceId: string;
+  priceId?: string;
   workspaceId: string;
+  planId: string;
   successUrl: string;
   cancelUrl: string;
+  priceData?: {
+    currency: "sar";
+    unitAmount: number;
+    interval: "month" | "year";
+    productName: string;
+  };
 }): Promise<Stripe.Checkout.Session> {
+  if (!opts.priceId && !opts.priceData) {
+    throw new Error("A Stripe price or inline price data is required");
+  }
+
+  const lineItem: Stripe.Checkout.SessionCreateParams.LineItem = opts.priceData
+    ? {
+        price_data: {
+          currency: opts.priceData.currency,
+          unit_amount: opts.priceData.unitAmount,
+          recurring: { interval: opts.priceData.interval },
+          product_data: {
+            name: opts.priceData.productName,
+            description: "اشتراك منصة فكرة",
+          },
+        },
+        quantity: 1,
+      }
+    : { price: opts.priceId, quantity: 1 };
+
   return stripe.checkout.sessions.create({
     customer: opts.customerId,
     mode: "subscription",
-    line_items: [{ price: opts.priceId, quantity: 1 }],
+    line_items: [lineItem],
     success_url: opts.successUrl,
     cancel_url: opts.cancelUrl,
-    metadata: { workspaceId: opts.workspaceId },
+    locale: "ar",
+    metadata: { workspaceId: opts.workspaceId, planId: opts.planId },
     subscription_data: {
-      metadata: { workspaceId: opts.workspaceId },
+      metadata: { workspaceId: opts.workspaceId, planId: opts.planId },
     },
   });
 }
@@ -185,7 +212,7 @@ export async function createTopUpSession(opts: {
           currency: "usd",
           product_data: {
             name: `${opts.credits} AI Credits`,
-            description: "One-time credit top-up for Doable",
+            description: "One-time credit top-up for Fekra",
           },
           unit_amount: opts.amount,
         },
